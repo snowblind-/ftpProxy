@@ -1,0 +1,185 @@
+when RULE_INIT {
+    
+    #set authproxy to 1 to enable local authentication of FTP proxy - user DB exists in FTP-user datagroup. authproxy eq 0 proxy does not do local auth.
+    set static::authproxy 1
+set static::debug 1
+
+    set static::nonauthbanner "220-220 ---------------------------------------------------------------------------\r\n220-220\
+- * * * Welcome to the FTP Gateway * * *\r\n220-220\
+---------------------------------------------------------------------------\r\n220-220\
+-\r\n220-220\
+-\r\n220-220\
+-   For connecting to an external ftp server use the following syntax in the username field:\r\n220-220\
+-\r\n220-220\
+-   remote_user_name@remote_ftp_server\r\n220-220\
+-\r\n220-220\
+-   Example: user login@remoteserver\r\n220-220\
+-\r\n220-220\
+-\r\n220-220\
+-   Notice: All operations will be logged!\r\n220-220\
+-\r\n220-220\
+-\r\n220-220\
+--------------------------------------------------------------------------\r\n220-220\
+-\r\n220 remote_user_name@remote_ftp_server\r\n"
+
+set static::authbanner "220 Welcome to the F5 FTP Proxy - you must login first\r\n"
+
+set static::authenticatedbanner "230-230 Proxy authentication successful\r\n230-230\
+---------------------------------------------------------------------------\r\n230-230\
+- * * * Welcome to the FTP Gateway * * *\r\n230-230\
+---------------------------------------------------------------------------\r\n230-230\
+-\r\n230-230\
+-\r\n230-230\
+- You must login to the remote server\r\n230-230\
+-\r\n230-230\
+-\r\n230-230\
+- Usage: Use the user command to connect\r\n230-230\
+-\r\n230-230\
+-\r\n230-230\
+- example: user login@remoteserver\r\n230-230\
+-\r\n230-230\
+-\r\n230-230\
+- Notice: All operations will be logged!\r\n220-220\
+-\r\n230-230\
+--------------------------------------------------------------------------\r\n230-230\
+-\r\n230 F5 FTP proxy\r\n"
+}
+
+when CLIENT_ACCEPTED {
+
+if { $static::debug } { log local0. "client FTP accepted" }
+    #set variable to flag whether we've sent a proxy request to remote server
+ set proxyconnect 0
+ 
+ # check if the proxy is authenticating locally first - if not set user as authenticated else unauntenticated.
+    if {$static::authproxy eq 0 } {
+        TCP::respond $static::nonauthbanner
+        set authenticated 1
+        } else {
+        TCP::respond $static::authbanner
+        set authenticated 0
+    }    
+        
+  TCP::collect
+}
+
+when CLIENT_DATA {
+
+if { $static::debug } { log local0. "client payload - [TCP::payload]" }
+
+# if user is authenticated and USER command is seen - it's a remote server proxy connection
+if { [TCP::payload] starts_with "USER" && $authenticated eq 1 } {
+
+    
+#take the USER string in form of "USER user@sitename"
+        scan [TCP::payload] {%[^@]@%s} garbage sitename
+        scan $garbage %s%s cmd uid
+set sitename [string tolower $sitename]
+if { $static::debug } { log local0. "sitename:$sitename - cmd:$cmd - uid:$uid" }
+        
+#is the sitename an IP or hostname - if the sitename looks like an IP save it, else try and resolve the IP address
+if { $sitename matches_regex {\b(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b} } {
+set ips $sitename
+} else {
+set ips [RESOLV::lookup @1.1.1.1 -a $sitename]
+}
+        
+if {$ips eq "" } {
+#No IP or sitename was not resolvable - reject the connection
+if { $static::debug } { log local0. "Could not determine the FTP site - sitename:$sitename"}
+TCP::respond "434 Requested host unavailable - $sitename was not resolvable \r\n"
+TCP::payload replace 0 [TCP::payload length] ""
+reject
+} else {
+#clear the payload and forward the ftp connection to the destination
+TCP::payload replace 0 [TCP::payload length] ""
+node [lindex $ips 0] [TCP::local_port]
+TCP::release
+if { $static::debug } { log local0. "address [lindex $ips 0] port [TCP::local_port]" }
+}
+
+
+} elseif { $authenticated eq 0 }{
+#user is still unauthenticated lets try and authenticate
+if { [TCP::payload] starts_with "USER" } {
+# get user id
+scan [TCP::payload] %s%s cmd uid
+
+if { $static::debug } { log local0. "UID: $uid\n" }
+# respond to client with password request
+    TCP::respond "331 Password required for $uid\r\n"
+            TCP::payload replace 0 [TCP::payload length] ""
+} elseif { [TCP::payload] starts_with "PASS" } {
+#if password received from client lets try and authenticate
+#get the password from payload
+scan [TCP::payload] %s%s cmd pass
+
+#compare cleartext password with entry in FTP-users datagroup - dataqgroup must be created.
+if { [ set password [class match -value -- $uid equals FTP-users]] eq $pass } {
+#user authenticated
+if { $static::debug } { log local0. "user authenticated\n" }
+                # if success respond with 230 and set authenticated flag to 1
+TCP::respond $static::authenticatedbanner
+TCP::payload replace 0 [TCP::payload length] ""
+set authenticated 1
+} else {
+TCP::respond "430 Invalid Username or password\r\n"
+TCP::payload replace 0 [TCP::payload length] ""
+set authenticated 0
+}
+
+}
+
+}
+
+if { $proxyconnect eq 0 } {
+
+# deal with commands sent to F5 proxy before connection establed to remote server.
+
+if { [TCP::payload] starts_with "SYST"} {
+    TCP::respond "215 F5 emulated proxy\r\n"
+    TCP::payload replace 0 [TCP::payload length] ""
+} elseif { [TCP::payload] starts_with "QUIT"} {
+    TCP::respond "221 Goodbye\r\n"
+    TCP::payload replace 0 [TCP::payload length] ""
+} elseif { (!([TCP::payload] starts_with "USER") || !([TCP::payload] starts_with "PASS")) && !([TCP::payload] eq "") } { 
+    if { $static::debug } { log local0. "proxyc=0 elseif TCPP=[TCP::payload]"}
+    # if a command is sent to F5 proxy and there isn't a remote server connection established respond with command not recognised
+TCP::respond "501-- Proxy command not recognised\r\n501 Connect to remote server first using: user login@remoteserver\r\n"
+    TCP::payload replace 0 [TCP::payload length] ""
+}
+}
+
+
+#only release the TCP payload if user has has connected to proxy and is authenticated otherwise just collect TCP payload for user authentication
+ if {$proxyconnect && $authenticated} {TCP::release}
+  TCP::collect
+}
+
+
+when SERVER_CONNECTED {
+if { $static::debug } { log local0. "connected to server" }
+    set proxyconnect 1
+  TCP::collect
+}
+
+when SERVER_DATA {
+
+if { $static::debug } { log local0. "server payload [TCP::payload]" }
+
+    if { [TCP::payload] starts_with "220 " }{
+    #220 connection ok - return the user name specified to destination FTP server 
+if { $static::debug } { log local0. "server found 220 ok" }
+    TCP::respond "USER $uid\r\n"
+    TCP::payload replace 0 [TCP::payload length] ""
+
+    } elseif { [TCP::payload] starts_with "220-" }{
+    #deal with multiline banners - clear the payload ensure nothing is sent back to client
+    TCP::payload replace 0 [TCP::payload length] ""
+    }
+    
+
+ TCP::release
+ TCP::collect
+
+}
