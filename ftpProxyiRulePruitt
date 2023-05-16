@@ -1,0 +1,150 @@
+when RULE_INIT {
+  set DEBUG 1
+  #------------------------------------------------------------------------
+  # FTP Commands
+  #------------------------------------------------------------------------
+  set sec_block_anonymous_ftp 1
+  set sec_block_passive_ftp 0
+  set sec_block_retr_cmd 0
+  set sec_block_stor_cmd 0
+  set sec_block_rename_cmd 0
+  set sec_block_port_cmd 0
+  set sec_block_rmd_cmd 0
+  set sec_block_mkd_cmd 0
+  set sec_block_list_cmd 0
+  set sec_block_pwd_cmd 0
+  set sec_block_cwd_cmd 0
+  set sec_block_dele_cmd 1
+}
+
+when CLIENT_ACCEPTED {
+  if { $::DEBUG } { log local0. "client accepted" }
+  TCP::collect
+  TCP::release
+}
+
+when CLIENT_DATA {
+  if { $::DEBUG } { log local0. "----------------------------------------------------------" }
+  if { $::DEBUG } { log local0. "payload [TCP::payload]" }
+  set client_data [string trim [TCP::payload]]
+  #---------------------------------------------------
+  # Block or alert specific commands
+  #---------------------------------------------------
+  switch -glob $client_data {
+    "USER anonymous*" -
+    "USER ftp*" {
+      if { $::DEBUG } { log local0. "LOG: Anonymous login detected" }
+      if { $::sec_block_anonymous_ftp } {
+        TCP::respond "530 Guest user not allowed\r\n";
+        reject
+      }
+    }
+    "PASV*" {
+      if { $::DEBUG } { log local0. "LOG: passive request detected" }
+      if { $::sec_block_passive_ftp  } {
+        TCP::respond "502 Passive commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+
+    "RETR*" {
+      if { $::DEBUG } { log local0. "LOG: RETR request detected" }
+      if { $::sec_block_retr_cmd  } {
+        TCP::respond "550 RETR commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "STOR*" {
+      if { $::DEBUG } { log local0. "LOG: STOR request detected" }
+      if { $::sec_block_stor_cmd  } {
+        TCP::respond "550 STOR commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "RNFR*" -
+    "RNTO*" {
+      if { $::DEBUG } { log local0. "LOG: RENAME request detected" }
+      if { $::sec_block_rename_cmd  } {
+        TCP::respond "550 RENAME commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "PORT*" {
+      if { $::DEBUG } { log local0. "LOG: PORT request detected" }
+      if { $::sec_block_port_cmd  } {
+        TCP::respond "550 PORT commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "RMD*" {
+      if { $::DEBUG } { log local0. "LOG: RMD request detected" }
+      if { $::sec_block_rmd_cmd  } {
+        TCP::respond "550 RMD commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "MKD*" {
+      if { $::DEBUG } { log local0. "LOG: MKD request detected" }
+      if { $::sec_block_mkd_cmd } {
+        TCP::respond "550 MKD commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "LIST*" {
+      if { $::DEBUG } { log local0. "LOG: LIST request detected" }
+      if { $::sec_block_list_cmd } {
+        TCP::respond "550 LIST commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "PWD*" {
+      if { $::DEBUG } { log local0. "LOG: PWD request detected" }
+      if { $::sec_block_pwd_cmd } {
+        TCP::respond "550 PWD commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "CWD*" {
+      if { $::DEBUG } { log local0. "LOG: CWD request detected" }
+      if { $::sec_block_cwd_cmd } {
+        TCP::respond "550 CWD commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+    "DELE*" {
+      if { $::DEBUG } { log local0. "LOG: DELE request detected" }
+      if { $::sec_block_dele_cmd } {
+        TCP::respond "550 DELE commands not allowed\r\n"
+        TCP::payload replace 0 [string length $client_data] ""
+        return
+      }
+    }
+  }
+  TCP::release
+  TCP::collect
+}
+
+when SERVER_CONNECTED {
+  if { $::DEBUG } { log "server connected" }
+  TCP::release
+  TCP::collect
+}
+when SERVER_DATA {
+  if { $::DEBUG } { log local0. "payload <[TCP::payload]>" }
+  TCP::release
+  TCP::collect
+}
+
+when CLIENT_CLOSED {
+  if { $::DEBUG } { log local0. "client closed" }
+}
